@@ -230,7 +230,6 @@ footer{text-align:center;padding:10px 20px 40px;color:var(--muted)}
 
   <section class="panel" aria-labelledby="voiceHeading">
     <h2 class="sr-only" id="voiceHeading">Voice settings</h2>
-    <div class="group"><span class="label" id="styleLbl">Style</span><div class="chips" id="styleChips" role="group" aria-labelledby="styleLbl"></div></div>
     <div class="group"><span class="label" id="voiceLbl">Voice</span><div class="chips" id="voiceChips" role="group" aria-labelledby="voiceLbl"></div></div>
     <div class="group"><span class="label" id="speedLbl">Speed</span><div class="chips" id="speedChips" role="group" aria-labelledby="speedLbl"></div></div>
     <div class="group">
@@ -318,15 +317,14 @@ const PRESETS = {
   boy:   { label: '👦 Boy',    pitch: 1.15, pref: 'male' },
   gents: { label: '🎩 Gents',  pitch: 0.55, pref: 'male' }
 };
-const SPEEDS = {   // rate = talking speed, bpm = beats per minute for the sing-song beat
-  slow:   { label: '🐢 Slow',   rate: 0.7, bpm: 60 },
-  normal: { label: '🚶 Normal', rate: 0.9, bpm: 72 },
-  fast:   { label: '🐇 Fast',   rate: 1.1, bpm: 88 }
+const SPEEDS = {
+  slow:   { label: '🐢 Slow',   rate: 0.7 },
+  normal: { label: '🚶 Normal', rate: 0.9 },
+  fast:   { label: '🐇 Fast',   rate: 1.1 }
 };
-const STYLES = { music: '🎼 Sing + music', sing: '🎤 Sing-song', read: '📖 Read aloud' };
 const CATS = { all: '🌈 All', animals: '🐾 Animals', adventure: '🚀 Adventure', bedtime: '🌙 Bedtime', songs: '🎶 Songs', favs: '❤️ Favorites' };
 
-const settings = Object.assign({ voice: 'auto', speed: 'normal', device: '', style: 'music' }, store.get('tt.settings', {}));
+const settings = Object.assign({ voice: 'auto', speed: 'normal', device: '' }, store.get('tt.settings', {}));
 const favs = new Set(store.get('tt.favs', []));
 let stars = Number(store.get('tt.stars', 0)) || 0;
 const view = { cat: 'all', query: '' };
@@ -440,121 +438,6 @@ function previewVoice() {
   synth.speak(u);
 }
 
-/* ---------- singing: a steady beat, a simple tune, and a music-box backing ----------
-   Browsers can only *speak*, so we make speech feel like singing:
-   1. every line is split into short phrases,
-   2. each phrase starts exactly on a beat (steady rhythm),
-   3. each phrase gets a different pitch that follows a tune,
-   4. the last phrase of a line is stretched out,
-   5. a music box plays the tune + a gentle chord pattern underneath. */
-const MELODY = [[0, 4, 7, 4], [7, 9, 7, 4], [4, 7, 9, 12], [12, 9, 7, 0]]; // semitones above C, one row per line
-const CHORDS = [[60, 64, 67], [65, 69, 72], [67, 71, 74], [60, 64, 67]];     // C, F, G, C (MIDI note numbers)
-const LEAD = 140;                                                            // ms: speech engines start a little late
-const midi = m => 440 * Math.pow(2, (m - 69) / 12);
-let audio = null;
-const song = { t0: 0, beatMs: 830, next: 0, timer: null };
-
-function ensureAudio() {
-  if (audio) { if (audio.state === 'suspended') audio.resume(); return audio; }
-  const AC = window.AudioContext || window.webkitAudioContext;
-  try { audio = AC ? new AC() : null; } catch { audio = null; }
-  return audio;
-}
-
-function tone(note, whenMs, { vol = 0.12, dur = 1.1, type = 'triangle' } = {}) {
-  if (!audio) return;
-  const t = audio.currentTime + Math.max(0, (whenMs - performance.now()) / 1000);
-  const osc = audio.createOscillator();
-  const gain = audio.createGain();
-  osc.type = type;
-  osc.frequency.value = midi(note);
-  gain.gain.setValueAtTime(0.0001, t);
-  gain.gain.exponentialRampToValueAtTime(vol, t + 0.012);
-  gain.gain.exponentialRampToValueAtTime(0.0001, t + dur);
-  osc.connect(gain).connect(audio.destination);
-  osc.start(t);
-  osc.stop(t + dur + 0.05);
-}
-
-function playBeat(b, when) {
-  const chord = CHORDS[Math.floor(b / 4) % CHORDS.length];
-  if (b % 4 === 0) tone(chord[0] - 24, when, { vol: 0.17, dur: 1.7, type: 'sine' });   // deep root note
-  if (b % 4 === 2) tone(chord[2] - 24, when, { vol: 0.10, dur: 1.2, type: 'sine' });   // fifth
-  tone(chord[[0, 1, 2, 1][b % 4]], when, { vol: 0.06, dur: 0.9 });                    // music-box arpeggio
-}
-
-function startBeat() {
-  stopBeat();
-  song.beatMs = 60000 / (SPEEDS[settings.speed] || SPEEDS.normal).bpm;
-  song.t0 = performance.now() + 200;
-  song.next = 0;
-  const pump = () => {
-    while (song.t0 + song.next * song.beatMs < performance.now() + 250) {
-      const b = song.next++;
-      if (settings.style === 'music') playBeat(b, song.t0 + b * song.beatMs);
-    }
-  };
-  pump();
-  song.timer = setInterval(pump, 60);
-}
-
-function stopBeat() { clearInterval(song.timer); song.timer = null; }
-
-// Run fn at the next beat (a little early, to make up for the speech engine's start-up delay).
-function atNextBeat(fn, token) {
-  const now = performance.now();
-  const k = Math.max(0, Math.ceil((now + LEAD - song.t0) / song.beatMs));
-  const at = song.t0 + k * song.beatMs;
-  setTimeout(() => { if (token === player.token && player.status === 'playing') fn(); }, Math.max(0, at - LEAD - now));
-}
-
-function chunkLine(text) {
-  const out = [];
-  for (const part of text.match(/[^,;.!?]+[,;.!?]*/g) || [text]) {
-    const words = part.trim().split(/\s+/).filter(Boolean);
-    if (!words.length) continue;
-    if (words.length > 3) {
-      const cut = Math.ceil(words.length / 2);
-      out.push(words.slice(0, cut).join(' '), words.slice(cut).join(' '));
-    } else out.push(words.join(' '));
-  }
-  return out;
-}
-
-function singLine(token, item) {
-  const line = player.index;
-  const chunks = chunkLine(item.lines[line]);
-  const preset = PRESETS[settings.voice] || PRESETS.auto;
-  let c = 0;
-
-  const singChunk = () => {
-    const semi = MELODY[line % MELODY.length][c % 4];
-    const last = c === chunks.length - 1;
-    const u = new SpeechSynthesisUtterance(chunks[c]);
-    applyVoice(u);
-    u.pitch = Math.min(2, Math.max(0.2, preset.pitch * Math.pow(2, (semi - 5) / 14)));  // melody in the voice
-    u.rate = Math.max(0.5, u.rate * (last ? 0.8 : 0.95));                                // stretch the line ending
-    u.onstart = () => {
-      if (token === player.token && settings.style === 'music') tone(72 + semi, performance.now(), { vol: 0.16, dur: last ? 1.5 : 0.8 });
-    };
-    u.onend = () => {
-      if (token !== player.token) return;
-      c++;
-      if (c < chunks.length) atNextBeat(singChunk, token);
-      else { player.index++; atNextBeat(() => speakLine(token), token); }
-    };
-    u.onerror = e => {
-      if (token !== player.token || e.error === 'canceled' || e.error === 'interrupted') return;
-      toast("Oops, the voice stopped. Let's try again!");
-      resetPlayer();
-    };
-    player.utterance = u;
-    synth.speak(u);
-  };
-
-  atNextBeat(singChunk, token);
-}
-
 /* ---------- player (speaks one line at a time so we can highlight it) ---------- */
 function setActive(id, index) {
   $$('.line.active').forEach(el => el.classList.remove('active'));
@@ -586,7 +469,6 @@ function syncUI() {
 function resetPlayer() {
   player.token++;
   player.id = null; player.index = 0; player.status = 'idle'; player.utterance = null;
-  stopBeat();
   if (synth) synth.cancel();
   syncUI();
 }
@@ -596,7 +478,6 @@ function speakLine(token) {
   const item = byId(player.id);
   if (player.index >= item.lines.length) return finish(item);
   setActive(item.id, player.index);
-  if (settings.style !== 'read') return singLine(token, item);
   const u = new SpeechSynthesisUtterance(item.lines[player.index]);
   applyVoice(u);
   u.onend = () => {
@@ -618,8 +499,6 @@ function start(id) {
   resetPlayer();
   player.id = id; player.index = 0; player.status = 'playing';
   const token = ++player.token;
-  ensureAudio();
-  startBeat();
   syncUI();
   speakLine(token);
 }
@@ -627,7 +506,6 @@ function start(id) {
 function pause() {
   player.status = 'paused';
   player.token++;
-  stopBeat();
   synth.cancel();
   syncUI();
 }
@@ -635,8 +513,6 @@ function pause() {
 function resume() {
   player.status = 'playing';
   const token = ++player.token;
-  ensureAudio();
-  startBeat();
   syncUI();
   speakLine(token);
 }
@@ -648,9 +524,7 @@ function togglePlay(id) {
 }
 
 function finish(item) {
-  const happy = settings.style === 'music';
   resetPlayer();
-  if (happy && audio) [60, 64, 67, 72, 76].forEach((n, i) => tone(n, performance.now() + i * 90, { vol: 0.13, dur: 2 }));
   stars++; store.set('tt.stars', stars); renderStars(true);
   toast('Great singing! ⭐ ' + item.title);
   confetti();
@@ -781,9 +655,7 @@ addEventListener('pagehide', () => { if (synth) synth.cancel(); });
 chips($('#voiceChips'), () => Object.entries(PRESETS).map(([k, p]) => [k, p.label]), () => settings.voice,
       key => { settings.voice = key; store.set('tt.settings', settings); previewVoice(); });
 chips($('#speedChips'), () => Object.entries(SPEEDS).map(([k, s]) => [k, s.label]), () => settings.speed,
-      key => { settings.speed = key; store.set('tt.settings', settings); if (player.status === 'playing') startBeat(); });
-chips($('#styleChips'), () => Object.entries(STYLES), () => settings.style,
-      key => { settings.style = key; store.set('tt.settings', settings); if (key === 'music') ensureAudio(); });
+      key => { settings.speed = key; store.set('tt.settings', settings); });
 const drawCats = chips($('#catChips'),
       () => Object.entries(CATS).map(([k, label]) => [k, k === 'favs' && favs.size ? label + ' (' + favs.size + ')' : label]),
       () => view.cat, key => { view.cat = key; renderGrid(); });
